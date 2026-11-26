@@ -1,71 +1,118 @@
-// Shared parsing + iCalendar logic. Runs in the browser and in Node (for tests).
+// Shared parsing + iCalendar logic. Columns are found by position under the header row,
+// so any league works.  Runs in the browser and in Node (for tests).
 // Mirrors python/curling_schedule_to_ics.py.
 
 export const CLUB = "RCN (Navy) Curling Club, Ottawa";
 export const TZID = "America/Toronto";
 
-// One schedule row, e.g.
-//   Mixed Fixed: Weekend 1 Fri, Oct 2, 2026 5:30 pm A Sheet 4 Waterman
-const ROW_RE = new RegExp(
-  String.raw`^(?<league>.+?)\s+` +
-  String.raw`(?<round>\d+)\s+` +
-  String.raw`(?<when>(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}\s*[ap]m)\s+` +
-  String.raw`(?:(?<flight>\S+)\s+)?` +
-  String.raw`(?<loc>Sheet\s+\S+)` +
-  String.raw`(?:\s+(?<versus>.*))?$`,
-  "i"
-);
 const NAME_RE = /My Personal Schedule\s*\(([^)]+)\)/;
+// "Fri, Oct 2, 2026 5:30 pm" (weekday and comma optional)
+const WHEN_RE = /(?:[A-Za-z]{3,9},?\s+)?([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*([ap])\.?m\.?/i;
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
-/** Rebuild text lines from a pdf.js document by grouping items on the same baseline. */
-export async function pdfToLines(pdf) {
-  const lines = [];
+const CELL_GAP = 10;  // points; gaps wider than this separate columns
+const ROW_TOL = 3;    // points; items within this vertical distance are on the same line
+const WRAP_GAP = 1.6; // a non-game line closer than this many line heights to the game above is a wrapped cell
+
+/** Wall-clock date parts (Ottawa time). */
+export function parseWhen(text) {
+  const m = text.replace(/\s+/g, " ").match(WHEN_RE);
+  if (!m || !(m[1].slice(0, 3).toLowerCase() in MONTHS)) return null;
+  const h = (+m[4] % 12) + (m[6].toLowerCase() === "p" ? 12 : 0);
+  return { y: +m[3], mo: MONTHS[m[1].slice(0, 3).toLowerCase()], d: +m[2], h, mi: +m[5] };
+}
+
+/** Text items with positions (top-down coordinates) from every page of a pdf.js document. */
+export async function pdfToPages(pdf) {
+  const pages = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const { items } = await page.getTextContent();
-    const rows = [];
+    const words = [];
     for (const it of items) {
       if (!it.str || !it.str.trim()) continue;
-      const y = it.transform[5], x = it.transform[4];
-      let row = rows.find(r => Math.abs(r.y - y) < 3);
-      if (!row) rows.push(row = { y, parts: [] });
-      row.parts.push({ x, s: it.str });
+      // split runs that contain spaces into words, spreading the width evenly by character
+      const x = it.transform[4], top = -it.transform[5], cw = it.width / Math.max(it.str.length, 1);
+      const re = /\S+/g; let m;
+      while ((m = re.exec(it.str))) {
+        words.push({ text: m[0], x0: x + m.index * cw, x1: x + (m.index + m[0].length) * cw, top, h: it.height || 8 });
+      }
     }
-    rows.sort((a, b) => b.y - a.y);
-    for (const r of rows) {
-      r.parts.sort((a, b) => a.x - b.x);
-      lines.push(r.parts.map(q => q.s).join(" "));
+    pages.push(words);
+  }
+  return pages;
+}
+
+function groupLines(words) {
+  const lines = [];
+  for (const w of [...words].sort((a, b) => a.top - b.top || a.x0 - b.x0)) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(last.top - w.top) <= ROW_TOL) last.words.push(w);
+    else lines.push({ top: w.top, words: [w] });
+  }
+  for (const line of lines) {
+    const cells = [];
+    for (const w of line.words.sort((a, b) => a.x0 - b.x0)) {
+      const c = cells[cells.length - 1];
+      if (c && w.x0 - c.x1 <= CELL_GAP) { c.text += " " + w.text; c.x1 = w.x1; }
+      else cells.push({ text: w.text, x0: w.x0, x1: w.x1 });
     }
+    line.cells = cells;
+    line.text = cells.map(c => c.text).join(" ");
   }
   return lines;
 }
 
-/** Wall-clock date parts (Ottawa time) from "Fri, Oct 2, 2026 5:30 pm". */
-function parseWhen(when) {
-  const m = when.replace(/\s+/g, " ").match(/^\w{3}, (\w{3}) (\d{1,2}), (\d{4}) (\d{1,2}):(\d{2}) ?([ap]m)$/i);
-  if (!m) return null;
-  let h = +m[4] % 12;
-  if (m[6].toLowerCase() === "pm") h += 12;
-  return { y: +m[3], mo: MONTHS[m[1].toLowerCase()], d: +m[2], h, mi: +m[5] };
+const isHeader = l => /league/i.test(l.text) && /versus|opponent/i.test(l.text) && l.cells.length >= 3;
+
+function assign(cells, columns) {
+  const row = Object.fromEntries(columns.map(c => [c.name, ""]));
+  for (const cell of cells) {
+    const mid = (cell.x0 + cell.x1) / 2;
+    const col = columns.reduce((best, c) => Math.abs(c.mid - mid) < Math.abs(best.mid - mid) ? c : best);
+    row[col.name] = (row[col.name] + " " + cell.text).trim();
+  }
+  return row;
 }
 
-export function parseSchedule(lines) {
-  const text = lines.join("\n");
-  const nm = text.match(NAME_RE);
-  const player = nm ? nm[1].trim() : null;
+export function findCol(columns, ...keys) {
+  for (const k of keys) for (const c of columns) if (c.toLowerCase().includes(k)) return c;
+  return null;
+}
+
+/** -> { player, columns: [names], games: [{<column>: text, ..., start}] } */
+export function parseSchedule(pages) {
+  let player = null, columns = [];
   const games = [];
-  for (const raw of lines) {
-    const line = raw.replace(/\s+/g, " ").trim();
-    const m = line.match(ROW_RE);
-    if (!m) continue;
-    const g = Object.fromEntries(Object.entries(m.groups).map(([k, v]) => [k, (v || "").trim()]));
-    g.loc = g.loc.replace(/\s+/g, " ");
-    const start = parseWhen(g.when);
-    if (!start) continue;
-    games.push({ ...g, start });
+  for (const words of pages) {
+    let prevGameLine = null;
+    for (const line of groupLines(words)) {
+      const nm = !player && line.text.match(NAME_RE);
+      if (nm) player = nm[1].trim();
+      if (isHeader(line)) {
+        columns = line.cells.map(c => ({ name: c.text, mid: (c.x0 + c.x1) / 2 }));
+        prevGameLine = null;
+        continue;
+      }
+      if (!columns.length) continue;
+      const row = assign(line.cells, columns);
+      const names = columns.map(c => c.name);
+      const timeCol = findCol(names, "time", "date");
+      let start = timeCol ? parseWhen(row[timeCol]) : null;
+      if (!start) start = parseWhen(names.filter(n => /date|time/i.test(n)).map(n => row[n]).join(" "));
+      if (start) {
+        games.push({ ...row, start });
+        prevGameLine = line;
+      } else if (prevGameLine && games.length &&
+                 line.top - prevGameLine.top < WRAP_GAP * Math.max(line.words[0].h, 8)) {
+        const g = games[games.length - 1];
+        for (const [k, v] of Object.entries(row)) if (v) g[k] = (g[k] + " " + v).trim();
+      } else {
+        prevGameLine = null;
+      }
+    }
   }
-  return { player, games };
+  return { player, columns: columns.map(c => c.name), games };
 }
 
 // Use a UTC Date purely as a wall-clock calculator (no time zone conversion).
@@ -93,7 +140,10 @@ async function uid(seed) {
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16) + "@curling-schedule";
 }
 
-export async function buildIcs({ player, games }, { mixedMinutes = 120, doublesMinutes = 90 } = {}) {
+export async function buildIcs({ player, columns, games }, { mixedMinutes = 120, doublesMinutes = 90 } = {}) {
+  const leagueCol = findCol(columns, "league", "event", "division");
+  const locCol = findCol(columns, "loc", "sheet", "ice");
+  const vsCol = findCol(columns, "versus", "opponent", " vs");
   const now = new Date();
   const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
   const out = [
@@ -108,22 +158,22 @@ export async function buildIcs({ player, games }, { mixedMinutes = 120, doublesM
     "END:VTIMEZONE",
   ];
   for (const g of games) {
-    const minutes = /doubles/i.test(g.league) ? doublesMinutes : mixedMinutes;
+    const league = leagueCol ? g[leagueCol] || "" : "";
+    const loc = locCol ? g[locCol] || "" : "";
+    const vs = vsCol ? g[vsCol] || "" : "";
+    const minutes = /doubles/i.test(league) ? doublesMinutes : mixedMinutes;
     const s = new Date(Date.UTC(g.start.y, g.start.mo, g.start.d, g.start.h, g.start.mi));
     const e = new Date(s.getTime() + minutes * 60000);
-    const vs = g.versus || "TBD";
-    const notes = [
-      `League: ${g.league}`, `Round: ${g.round}`, `Game Time: ${g.when}`,
-      `Flight: ${g.flight}`, `Loc: ${g.loc}`, `Versus: ${g.versus}`,
-    ].join("\n");
+    const title = "Curling" + (league ? `: ${league}` : "") + ` vs ${vs || "TBD"}` + (loc ? ` (${loc})` : "");
+    const notes = columns.map(c => `${c}: ${g[c] ?? ""}`).join("\n"); // every column, in PDF order
     out.push(
       "BEGIN:VEVENT",
-      `UID:${await uid(`${player ?? "None"}|${g.league}|${fmtLocal(s).slice(0, 13)}`)}`,
+      `UID:${await uid(`${player ?? "None"}|${league}|${fmtLocal(s).slice(0, 13)}`)}`,
       `DTSTAMP:${stamp}`,
       `DTSTART;TZID=${TZID}:${fmtLocal(s)}`,
       `DTEND;TZID=${TZID}:${fmtLocal(e)}`,
-      `SUMMARY:${esc(`Curling: ${g.league} vs ${vs} (${g.loc})`)}`,
-      `LOCATION:${esc(`${CLUB} - ${g.loc}`)}`,
+      `SUMMARY:${esc(title)}`,
+      `LOCATION:${esc(CLUB + (loc ? ` - ${loc}` : ""))}`,
       `DESCRIPTION:${esc(notes)}`,
       "END:VEVENT",
     );

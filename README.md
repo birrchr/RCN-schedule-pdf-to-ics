@@ -32,6 +32,7 @@ docs/                       ← the website (served by GitHub Pages)
   vendor/pdfjs/             ← Mozilla pdf.js 4.10.38 (Apache-2.0), vendored so there's no CDN dependency
 python/
   curling_schedule_to_ics.py
+tests/                      ← pytest + fake-schedule generator
 ```
 
 ## Hosting on GitHub Pages (free)
@@ -54,7 +55,7 @@ uv run python/curling_schedule_to_ics.py printMySchedule.php.pdf
 uv run python/curling_schedule_to_ics.py schedule.pdf -o games.ics --mixed-minutes 120 --doubles-minutes 90
 ```
 
-Without uv: `pip install pypdf`, then `python python/curling_schedule_to_ics.py schedule.pdf`.
+Without uv: `pip install pdfplumber`, then `python python/curling_schedule_to_ics.py schedule.pdf`.
 
 ## Running the site locally
 
@@ -64,13 +65,24 @@ ES modules don't load from `file://`, so serve the folder:
 cd docs && python -m http.server 8000   # then open http://localhost:8000
 ```
 
-## If the club changes its PDF layout
+## Works with any league
 
-Both versions match each schedule row with one regular expression: `ROW_RE` in `docs/schedule.js` and `python/curling_schedule_to_ics.py`. The expected row looks like:
+The parser isn't tied to particular leagues. It finds the header row (League … Versus), splits each line into cells by the wide gaps between columns, and puts each cell under the nearest header. As a result:
 
+- any league name works (Day Mens, Masters 55+, names with colons or apostrophes);
+- rounds like "Playoff", locations like "TBA" or "Ice 2", and multi-word flights or opponents are handled;
+- blank cells, league names that wrap onto two lines, and multi-page schedules are handled;
+- if the club adds a column, it automatically appears in the event notes.
+
+The only real assumption is a game-time cell such as `Fri, Oct 2, 2026 5:30 pm`. Games are counted as doubles (90 min) when the league name contains "Doubles".
+
+## Tests
+
+```bash
+uv run --with pdfplumber --with reportlab --with pytest pytest tests
 ```
-Mixed Fixed: Weekend 1 Fri, Oct 2, 2026 5:30 pm A Sheet 4 Waterman
-```
+
+`tests/make_test_pdf.py` builds a fake schedule (made-up names) with the awkward cases above.
 
 Please don't commit real schedule PDFs to the repo: they contain members' names.
 
