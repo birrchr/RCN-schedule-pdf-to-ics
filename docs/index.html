@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curling schedule → calendar</title>
+<meta name="description" content="Turn your RCN (Navy) Curling Club personal schedule PDF into a calendar file. Runs entirely in your browser.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='58' r='34' fill='%23c8102e'/><rect x='38' y='14' width='24' height='18' rx='6' fill='%23333'/></svg>">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #1c2430; --muted: #5b6675; --line: #dde2e8;
+    --accent: #0b3d6e; --accent-ink: #fff; --red: #c8102e; --ok: #1f7a4d; --warn: #a14b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #11161d; --card: #19212b; --ink: #e7ecf2; --muted: #9aa6b4; --line: #2b3542;
+            --accent: #6fa8e0; --accent-ink: #0b1622; --ok: #5cc28f; --warn: #f0a35e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 18px 60px; }
+  header h1 { font-size: 1.7rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); }
+  .stripe { height: 5px; background: linear-gradient(90deg, var(--red) 0 33%, var(--accent) 33% 100%); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-top: 20px; }
+  h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  ol.steps { margin: 0; padding-left: 1.2em; color: var(--muted); }
+  ol.steps li { margin: 2px 0; }
+  #drop { display: block; border: 2px dashed var(--line); border-radius: 12px; padding: 34px 16px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  #drop:hover, #drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  #drop strong { display: block; font-size: 1.05rem; }
+  #drop span { color: var(--muted); font-size: .92rem; }
+  #file { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  #file:focus-visible + #drop { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .opts { display: flex; flex-wrap: wrap; gap: 14px 24px; margin-top: 16px; }
+  .opts label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .95rem; }
+  .opts input { width: 5.5em; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
+  #status { margin: 14px 0 0; min-height: 1.5em; font-weight: 500; }
+  #status.ok { color: var(--ok); } #status.err { color: var(--warn); }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 11px 18px; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  .table-wrap { overflow-x: auto; margin-top: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  tr.past td { color: var(--muted); }
+  .note { color: var(--muted); font-size: .88rem; margin-top: 18px; }
+  footer { color: var(--muted); font-size: .85rem; margin-top: 30px; text-align: center; }
+  a { color: var(--accent); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="stripe"></div>
+<main>
+  <header>
+    <h1>Curling schedule → calendar</h1>
+    <p>Turn your RCN (Navy) Curling Club personal schedule into a file for Google Calendar, Outlook or Apple Calendar.</p>
+  </header>
+
+  <section class="card">
+    <h2>1. Get your schedule PDF</h2>
+    <ol class="steps">
+      <li>Sign in at <a href="https://curlnavy.com" rel="noopener">curlnavy.com</a> and open <em>My Schedule</em>.</li>
+      <li>Choose <em>Print</em>, then <em>Save as PDF</em>.</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>2. Drop it here</h2>
+    <input type="file" id="file" accept="application/pdf,.pdf">
+    <label id="drop" for="file">
+      <strong>Choose your schedule PDF</strong>
+      <span>or drag and drop it here</span>
+    </label>
+    <div class="opts">
+      <label>Mixed / league games <input type="number" id="mixed" value="120" min="15" max="300" step="15"> min</label>
+      <label>Doubles games <input type="number" id="doubles" value="90" min="15" max="300" step="15"> min</label>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+
+    <div id="result" hidden>
+      <div class="actions">
+        <button id="download" type="button">Download calendar file (.ics)</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Game time</th><th>League</th><th>Rd</th><th>Flight</th><th>Loc</th><th>Versus</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="note">🔒 Your PDF is read right here in your browser. Nothing is uploaded or stored.
+      All times are Ottawa time. The schedule only lists start times, so the end time is the start plus the game length above.
+      Each event's notes include every column from the schedule.</p>
+  </section>
+
+  <section class="card">
+    <h2>3. Import it</h2>
+    <ol class="steps">
+      <li><strong>Google Calendar:</strong> on a computer, Settings → Import &amp; export → Import, and pick the file.</li>
+      <li><strong>Outlook:</strong> open the file, or File → Open &amp; Export → Import/Export.</li>
+      <li><strong>iPhone / Mac:</strong> open the downloaded file and tap <em>Add All</em>.</li>
+    </ol>
+    <p class="note">Got an updated schedule later? Import the new file. Most calendar apps update the existing games instead of duplicating them. A game that moved to a new time will appear as a new event, so delete the old one.</p>
+  </section>
+
+  <footer>Unofficial tool, not affiliated with the club. <a href="https://github.com/" id="repo-link">Source on GitHub</a></footer>
+</main>
+
+<script type="module">
+  import * as pdfjsLib from "./vendor/pdfjs/pdf.min.mjs";
+  import { pdfToLines, parseSchedule, buildIcs, fileNameFor } from "./schedule.js";
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdfjs/pdf.worker.min.mjs", import.meta.url).href;
+
+  const $ = id => document.getElementById(id);
+  const fileInput = $("file"), drop = $("drop"), status = $("status");
+  let schedule = null;
+
+  function setStatus(msg, kind = "") { status.textContent = msg; status.className = kind; }
+
+  async function handle(file) {
+    if (!file) return;
+    $("result").hidden = true; schedule = null;
+    if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+      return setStatus("That doesn't look like a PDF. Save your schedule as a PDF and try again.", "err");
+    }
+    setStatus("Reading " + file.name + "…");
+    try {
+      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), verbosity: 0 }).promise;
+      schedule = parseSchedule(await pdfToLines(pdf));
+    } catch (e) {
+      console.error(e);
+      return setStatus("Couldn't read that PDF. Try saving the schedule as a PDF again.", "err");
+    }
+    if (!schedule.games.length) {
+      return setStatus("No games found. Is this the “My Personal Schedule” PDF from curlnavy.com?", "err");
+    }
+    render();
+  }
+
+  function render() {
+    const { player, games } = schedule;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    let upcoming = 0;
+    $("rows").replaceChildren(...games.map(g => {
+      const tr = document.createElement("tr");
+      const past = new Date(g.start.y, g.start.mo, g.start.d) < today;
+      if (past) tr.className = "past"; else upcoming++;
+      for (const v of [g.when, g.league, g.round, g.flight, g.loc, g.versus]) {
+        const td = document.createElement("td"); td.textContent = v; tr.append(td);
+      }
+      return tr;
+    }));
+    setStatus(`Found ${games.length} games${player ? " for " + player : ""} (${upcoming} upcoming).`, "ok");
+    $("result").hidden = false;
+  }
+
+  $("download").addEventListener("click", async () => {
+    if (!schedule) return;
+    const ics = await buildIcs(schedule, {
+      mixedMinutes: Math.max(15, +$("mixed").value || 120),
+      doublesMinutes: Math.max(15, +$("doubles").value || 90),
+    });
+    const url = URL.createObjectURL(new Blob([ics], { type: "text/calendar;charset=utf-8" }));
+    const a = Object.assign(document.createElement("a"), { href: url, download: fileNameFor(schedule.player) });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+
+  fileInput.addEventListener("change", () => handle(fileInput.files[0]));
+  for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); });
+  drop.addEventListener("drop", e => handle(e.dataTransfer.files[0]));
+
+  // On GitHub Pages (user.github.io/repo), point the footer link at the repo automatically.
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/);
+  if (m) $("repo-link").href = `https://github.com/${m[1]}/${location.pathname.split("/")[1] || ""}`;
+</script>
+</body>
+</html>
